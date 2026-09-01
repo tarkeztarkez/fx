@@ -2047,12 +2047,21 @@ pub fn Handlers(comptime App: type) type {
                 return;
             };
             defer result.deinit(app.alloc);
-            var safe = try text_utils.encodeTerminalSafe(app.alloc, result.output, 64 * 1024);
-            defer safe.deinit(app.alloc);
+            var rendered: std.Io.Writer.Allocating = .init(app.alloc);
+            defer rendered.deinit();
+            var lines = std.mem.splitScalar(u8, result.output[0..@min(result.output.len, 16 * 1024)], '\n');
+            var first = true;
+            while (lines.next()) |line| {
+                if (!first) try rendered.writer.writeByte('\n');
+                first = false;
+                var safe = try text_utils.encodeTerminalSafe(app.alloc, line, 64 * 1024);
+                defer safe.deinit(app.alloc);
+                try rendered.writer.writeAll(safe.bytes);
+            }
             try app.writeDomainNotice(.{
                 .topic = "update",
                 .tone = if (result.succeeded) .neutral else .warning,
-                .body = if (safe.bytes.len > 0) safe.bytes else "The fork updater returned no output.",
+                .body = if (rendered.written().len > 0) rendered.written() else "The fork updater returned no output.",
             }, true);
         }
 
