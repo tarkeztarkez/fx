@@ -17,6 +17,7 @@ const editor_state = @import("../input/editor_state.zig");
 const settings_catalog = @import("../config/settings_catalog.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
 const feedback_runtime = @import("../feedback/runtime.zig");
+const fork_update = @import("../upgrade/fork_update.zig");
 const output_contracts = @import("../output/output_contracts.zig");
 const diagnostics = @import("../workspace/diagnostics.zig");
 const workspace_commands = @import("../workspace/workspace_commands.zig");
@@ -384,6 +385,7 @@ pub fn Handlers(comptime App: type) type {
                 .rename_session = commandRenameSession,
                 .handle_notifications = commandHandleNotifications,
                 .handle_workspace = commandHandleWorkspace,
+                .update_fork = commandUpdateFork,
                 .show_version = commandShowVersion,
                 .unknown = commandUnknown,
             };
@@ -2033,6 +2035,24 @@ pub fn Handlers(comptime App: type) type {
                 .topic = "version",
                 .tone = .neutral,
                 .body = App.app_version,
+            }, true);
+        }
+
+        fn commandUpdateFork(ctx: *anyopaque) !void {
+            const app: *App = @ptrCast(@alignCast(ctx));
+            var result = fork_update.run(app.alloc) catch |err| {
+                const body = try std.fmt.allocPrint(app.alloc, "Could not run the fork updater: {s}", .{@errorName(err)});
+                defer app.alloc.free(body);
+                try app.writeDomainNotice(.{ .topic = "update", .tone = .@"error", .body = body }, true);
+                return;
+            };
+            defer result.deinit(app.alloc);
+            var safe = try text_utils.encodeTerminalSafe(app.alloc, result.output, 64 * 1024);
+            defer safe.deinit(app.alloc);
+            try app.writeDomainNotice(.{
+                .topic = "update",
+                .tone = if (result.succeeded) .neutral else .warning,
+                .body = if (safe.bytes.len > 0) safe.bytes else "The fork updater returned no output.",
             }, true);
         }
 

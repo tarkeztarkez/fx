@@ -136,16 +136,18 @@ afterEach(async () => {
 });
 
 function writeSeededChatGptLogin(testHome: string, accessToken = chatgptAccessToken()): void {
-  const fxDir = join(testHome, ".fx");
-  mkdirSync(fxDir, { recursive: true, mode: 0o700 });
-  chmodSync(fxDir, 0o700);
-  const authPath = join(fxDir, "chatgpt-auth.json");
+  const codexDir = join(testHome, ".codex");
+  mkdirSync(codexDir, { recursive: true, mode: 0o700 });
+  chmodSync(codexDir, 0o700);
+  const authPath = join(codexDir, "auth.json");
   writeFileSync(authPath, JSON.stringify({
-    version: 1,
-    access_token: accessToken,
-    refresh_token: "chatgpt-refresh",
-    expires_at_ms: Date.now() + 60 * 60 * 1000,
-    account_id: "acct_e2e",
+    auth_mode: "chatgpt",
+    tokens: {
+      access_token: accessToken,
+      refresh_token: "chatgpt-refresh",
+      account_id: "acct_e2e",
+    },
+    last_refresh: new Date().toISOString(),
   }) + "\n", { mode: 0o600 });
   chmodSync(authPath, 0o600);
 }
@@ -434,6 +436,7 @@ function startFakeOAuth(
 
 function chatgptAccessToken(accountId = "acct_e2e"): string {
   const payload = Buffer.from(JSON.stringify({
+    exp: Math.floor(Date.now() / 1000) + 60 * 60,
     "https://api.openai.com/auth": { chatgpt_account_id: accountId },
   })).toString("base64url");
   return `header.${payload}.signature`;
@@ -1171,7 +1174,7 @@ tmuxTest(
     await session.waitForComposer(TIMEOUT);
 
     expect(session.isAlive()).toBe(true);
-    expect(existsSync(join(home, ".fx", "chatgpt-auth.json"))).toBe(false);
+    expect(existsSync(join(home, ".codex", "auth.json"))).toBe(false);
     expect(await session.captureFullScrollback()).not.toContain("Signed in with Codex.");
     expect(readFileSync(stderrPath, "utf8")).toBe("");
   },
@@ -1212,7 +1215,7 @@ tmuxTest(
     await completeDisplayedCodexLogin(session, chatgptOauth);
     await session.waitForText("Switched to Codex subscription with gpt-5.6-sol.", TIMEOUT);
 
-    const authPath = join(home, ".fx", "chatgpt-auth.json");
+    const authPath = join(home, ".codex", "auth.json");
     expect(existsSync(authPath)).toBe(true);
     expect(statSync(authPath).mode & 0o077).toBe(0);
 
@@ -2207,7 +2210,7 @@ test(
     expect(login.stdout).not.toContain("Code:");
     expect(login.stderr).toBe("");
 
-    const authPath = join(home, ".fx", "chatgpt-auth.json");
+    const authPath = join(home, ".codex", "auth.json");
     expect(existsSync(authPath)).toBe(true);
     expect(statSync(authPath).mode & 0o077).toBe(0);
     const settingsPath = join(home, ".fx", "settings.json");
@@ -2915,7 +2918,7 @@ test(
     expect(login.code).toBe(1);
     expect(login.stdout).not.toContain("Signed in with Codex.");
     expect(login.stderr).toContain("fx login: could not load the target model catalog (malformed_response)");
-    expect(existsSync(join(home, ".fx", "chatgpt-auth.json"))).toBe(true);
+    expect(existsSync(join(home, ".codex", "auth.json"))).toBe(true);
     const settingsPath = join(home, ".fx", "settings.json");
     expect(existsSync(settingsPath)).toBe(false);
   },

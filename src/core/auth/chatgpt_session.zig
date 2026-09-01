@@ -2,18 +2,17 @@ const std = @import("std");
 const debug_trace = @import("../shared/debug_trace.zig");
 const host_target = @import("../hosts/target.zig");
 const io_mod = @import("../shared/io.zig");
-const profile_paths = @import("../shared/profile_paths.zig");
 const secret = @import("secret.zig");
 
 const Allocator = std.mem.Allocator;
-const schema_version: i64 = 1;
 const max_auth_file_bytes: usize = 64 * 1024;
 const expiry_skew_ms: i64 = 60 * 1000;
 const mutation_lock_file_name = "chatgpt-auth.lock";
 const mutation_lock_deadline_ms: u64 = 2000;
+const auth_root_dir_name = ".codex";
 
 pub const issuer = "https://auth.openai.com";
-pub const auth_file_name = profile_paths.chatgpt_auth_file_name;
+pub const auth_file_name = "auth.json";
 
 pub fn refreshDeadlineMs(expires_at_ms: i64) i64 {
     return @max(expires_at_ms - expiry_skew_ms, 0);
@@ -24,11 +23,13 @@ pub const Session = struct {
     refresh_token: []u8,
     expires_at_ms: i64,
     account_id: []u8,
+    id_token: ?[]u8 = null,
 
     pub fn deinit(self: *Session, alloc: Allocator) void {
         secret.zeroAndFree(alloc, self.access_token);
         secret.zeroAndFree(alloc, self.refresh_token);
         alloc.free(self.account_id);
+        if (self.id_token) |token| secret.zeroAndFree(alloc, token);
         self.* = undefined;
     }
 
@@ -83,7 +84,7 @@ pub fn load(alloc: Allocator) !?Session {
     };
     defer home_dir.close(io_mod.getIo());
 
-    var fx_dir = home_dir.openDir(io_mod.getIo(), profile_paths.root_dir_name, .{
+    var fx_dir = home_dir.openDir(io_mod.getIo(), auth_root_dir_name, .{
         .iterate = true,
         .follow_symlinks = false,
     }) catch |err| {
@@ -158,7 +159,7 @@ fn beginMutation() !Mutation {
     };
     defer home_dir.close();
 
-    const fx_dir = try io_mod.openOrCreateVerifiedPrivateDir(&home_dir, profile_paths.root_dir_name);
+    const fx_dir = try io_mod.openOrCreateVerifiedPrivateDir(&home_dir, auth_root_dir_name);
     return lockMutation(fx_dir);
 }
 
@@ -175,7 +176,7 @@ fn lockMutation(open_fx_dir: io_mod.VerifiedDir) !Mutation {
 }
 
 fn openExistingPrivateFxDir(home_dir: *io_mod.VerifiedDir) !io_mod.VerifiedDir {
-    var dir = try home_dir.dir.openDir(io_mod.getIo(), profile_paths.root_dir_name, .{
+    var dir = try home_dir.dir.openDir(io_mod.getIo(), auth_root_dir_name, .{
         .iterate = true,
         .follow_symlinks = false,
     });
@@ -198,36 +199,90 @@ pub fn parse(alloc: Allocator, bytes: []const u8) !Session {
     var parsed = try std.json.parseFromSlice(std.json.Value, alloc, bytes, .{});
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidChatGptAuthSession;
-    const object = parsed.value.object;
-    const version = object.get("version") orelse return error.InvalidChatGptAuthSession;
-    if (version != .integer or version.integer != schema_version) return error.InvalidChatGptAuthSession;
+    const root = parsed.value.object;
+    const tokens_value = root.get("tokens") orelse return error.InvalidChatGptAuthSession;
+    if (tokens_value != .object) return error.InvalidChatGptAuthSession;
+    const tokens = tokens_value.object;
 
-    const access_token = try dupeRequiredString(alloc, object, "access_token");
+    const access_token = try dupeRequiredString(alloc, tokens, "access_token");
     errdefer secret.zeroAndFree(alloc, access_token);
-    const refresh_token = try dupeRequiredString(alloc, object, "refresh_token");
+    const refresh_token = try dupeRequiredString(alloc, tokens, "refresh_token");
     errdefer secret.zeroAndFree(alloc, refresh_token);
-    const account_id = try dupeRequiredString(alloc, object, "account_id");
+    const account_id = try dupeRequiredString(alloc, tokens, "account_id");
     errdefer alloc.free(account_id);
-    const expires_at_ms = try requiredInteger(object, "expires_at_ms");
+    const id_token = if (tokens.get("id_token")) |value| blk: {
+        if (value != .string or value.string.len == 0) return error.InvalidChatGptAuthSession;
+        break :blk try alloc.dupe(u8, value.string);
+    } else null;
+    errdefer if (id_token) |token| secret.zeroAndFree(alloc, token);
     return .{
         .access_token = access_token,
         .refresh_token = refresh_token,
-        .expires_at_ms = expires_at_ms,
+        .expires_at_ms = try accessTokenExpiresAtMs(alloc, access_token),
         .account_id = account_id,
+        .id_token = id_token,
     };
 }
 
 pub fn stringify(alloc: Allocator, session: Session) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(alloc);
     errdefer out.deinit();
-    try out.writer.writeAll("{\"version\":1,\"access_token\":");
+    try out.writer.writeAll("{\"auth_mode\":\"chatgpt\",\"tokens\":{");
+    if (session.id_token) |token| {
+        try out.writer.writeAll("\"id_token\":");
+        try std.json.Stringify.value(token, .{}, &out.writer);
+        try out.writer.writeByte(',');
+    }
+    try out.writer.writeAll("\"access_token\":");
     try std.json.Stringify.value(session.access_token, .{}, &out.writer);
     try out.writer.writeAll(",\"refresh_token\":");
     try std.json.Stringify.value(session.refresh_token, .{}, &out.writer);
-    try out.writer.print(",\"expires_at_ms\":{d},\"account_id\":", .{session.expires_at_ms});
+    try out.writer.writeAll(",\"account_id\":");
     try std.json.Stringify.value(session.account_id, .{}, &out.writer);
+    try out.writer.writeAll("},\"last_refresh\":");
+    const refreshed_at = try formatIso8601(alloc, io_mod.milliTimestamp());
+    defer alloc.free(refreshed_at);
+    try std.json.Stringify.value(refreshed_at, .{}, &out.writer);
     try out.writer.writeAll("}\n");
     return out.toOwnedSlice();
+}
+
+pub fn accessTokenExpiresAtMs(alloc: Allocator, token: []const u8) !i64 {
+    var parts = std.mem.splitScalar(u8, token, '.');
+    _ = parts.next() orelse return error.InvalidChatGptAccessToken;
+    const payload = parts.next() orelse return error.InvalidChatGptAccessToken;
+    _ = parts.next() orelse return error.InvalidChatGptAccessToken;
+    if (parts.next() != null) return error.InvalidChatGptAccessToken;
+    const decoded_len = std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(payload) catch
+        return error.InvalidChatGptAccessToken;
+    const decoded = try alloc.alloc(u8, decoded_len);
+    defer alloc.free(decoded);
+    std.base64.url_safe_no_pad.Decoder.decode(decoded, payload) catch
+        return error.InvalidChatGptAccessToken;
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, decoded, .{}) catch
+        return error.InvalidChatGptAccessToken;
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidChatGptAccessToken;
+    const exp = parsed.value.object.get("exp") orelse return error.InvalidChatGptAuthSession;
+    if (exp != .integer or exp.integer <= 0) return error.InvalidChatGptAuthSession;
+    return std.math.mul(i64, exp.integer, std.time.ms_per_s) catch
+        return error.InvalidChatGptAuthSession;
+}
+
+fn formatIso8601(alloc: Allocator, timestamp_ms: i64) ![]u8 {
+    const seconds: u64 = @intCast(@max(@divFloor(timestamp_ms, std.time.ms_per_s), 0));
+    const epoch: std.time.epoch.EpochSeconds = .{ .secs = seconds };
+    const day = epoch.getDaySeconds();
+    const year_day = epoch.getEpochDay().calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    return std.fmt.allocPrint(alloc, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
+        year_day.year,
+        month_day.month.numeric(),
+        month_day.day_index + 1,
+        day.getHoursIntoDay(),
+        day.getMinutesIntoHour(),
+        day.getSecondsIntoMinute(),
+    });
 }
 
 fn dupeRequiredString(alloc: Allocator, object: std.json.ObjectMap, key: []const u8) ![]u8 {
@@ -236,18 +291,12 @@ fn dupeRequiredString(alloc: Allocator, object: std.json.ObjectMap, key: []const
     return alloc.dupe(u8, value.string);
 }
 
-fn requiredInteger(object: std.json.ObjectMap, key: []const u8) !i64 {
-    const value = object.get(key) orelse return error.InvalidChatGptAuthSession;
-    if (value != .integer) return error.InvalidChatGptAuthSession;
-    return value.integer;
-}
-
 test "ChatGPT auth session round trips without exposing token fields to structure" {
     const alloc = std.testing.allocator;
     var session = Session{
-        .access_token = try alloc.dupe(u8, "header.payload.signature"),
+        .access_token = try alloc.dupe(u8, "header.eyJleHAiOjJ9.signature"),
         .refresh_token = try alloc.dupe(u8, "refresh"),
-        .expires_at_ms = 1234,
+        .expires_at_ms = 2000,
         .account_id = try alloc.dupe(u8, "acct_123"),
     };
     defer session.deinit(alloc);

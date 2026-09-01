@@ -43,6 +43,7 @@ pub const ParsedCommand = union(enum) {
     statusline: []const u8,
     notifications: []const u8,
     workspace: []const u8,
+    update,
     version,
     unknown,
 };
@@ -87,6 +88,7 @@ pub const CommandHandlers = struct {
     rename_session: *const fn (ctx: *anyopaque, rest: []const u8) anyerror!void,
     handle_notifications: *const fn (ctx: *anyopaque, rest: []const u8) anyerror!void,
     handle_workspace: *const fn (ctx: *anyopaque, rest: []const u8) anyerror!void,
+    update_fork: *const fn (ctx: *anyopaque) anyerror!void,
     show_version: *const fn (ctx: *anyopaque) anyerror!void,
     unknown: *const fn (ctx: *anyopaque, cmd: []const u8) anyerror!void,
 };
@@ -135,6 +137,7 @@ fn parsedCommand(kind: SlashKind, payload: []const u8) ParsedCommand {
         .statusline => .{ .statusline = payload },
         .notifications => .{ .notifications = payload },
         .workspace => .{ .workspace = payload },
+        .update => .update,
         .version => .version,
     };
 }
@@ -192,6 +195,7 @@ pub fn route(registry: SlashRegistry, handlers: *const CommandHandlers, cmd: []c
         .statusline => |rest| try handlers.handle_statusline(handlers.ctx, rest),
         .notifications => |rest| try handlers.handle_notifications(handlers.ctx, rest),
         .workspace => |rest| try handlers.handle_workspace(handlers.ctx, rest),
+        .update => try handlers.update_fork(handlers.ctx),
         .version => try handlers.show_version(handlers.ctx),
         .unknown => try handlers.unknown(handlers.ctx, cmd),
     }
@@ -322,6 +326,7 @@ test "parse recognizes exact no-payload commands" {
     try std.testing.expectEqual(ParsedCommand.credits, parse(testSlashRegistry(), "/balance"));
     try std.testing.expectEqual(ParsedCommand.paste, parse(testSlashRegistry(), "/paste"));
     try std.testing.expectEqual(ParsedCommand.fast, parse(testSlashRegistry(), "/fast"));
+    try std.testing.expectEqual(ParsedCommand.update, parse(testSlashRegistry(), "/update"));
     try std.testing.expectEqual(ParsedCommand.version, parse(testSlashRegistry(), "/version"));
 }
 
@@ -531,6 +536,7 @@ fn testHandlers(ctx: *TestContext) CommandHandlers {
         .rename_session = unexpectedPayload,
         .handle_notifications = unexpectedPayload,
         .handle_workspace = unexpectedPayload,
+        .update_fork = unexpectedNoPayload,
         .show_version = unexpectedNoPayload,
         .unknown = unexpectedPayload,
     };

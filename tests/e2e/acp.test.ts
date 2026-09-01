@@ -529,22 +529,25 @@ function acpChatGptAccessToken(
   signature = "signature",
 ): string {
   const payload = Buffer.from(JSON.stringify({
+    exp: Math.floor(Date.now() / 1000) + 60 * 60,
     "https://api.openai.com/auth": { chatgpt_account_id: accountId },
   })).toString("base64url");
   return `header.${payload}.${signature}`;
 }
 
 function writeSeededAcpChatGptLogin(home: string, accessToken: string): void {
-  const fxDir = join(home, ".fx");
-  mkdirSync(fxDir, { recursive: true, mode: 0o700 });
-  chmodSync(fxDir, 0o700);
-  const authPath = join(fxDir, "chatgpt-auth.json");
+  const codexDir = join(home, ".codex");
+  mkdirSync(codexDir, { recursive: true, mode: 0o700 });
+  chmodSync(codexDir, 0o700);
+  const authPath = join(codexDir, "auth.json");
   writeFileSync(authPath, JSON.stringify({
-    version: 1,
-    access_token: accessToken,
-    refresh_token: "chatgpt-refresh",
-    expires_at_ms: Date.now() + 60 * 60 * 1000,
-    account_id: "acct_acp_e2e",
+    auth_mode: "chatgpt",
+    tokens: {
+      access_token: accessToken,
+      refresh_token: "chatgpt-refresh",
+      account_id: "acct_acp_e2e",
+    },
+    last_refresh: new Date().toISOString(),
   }) + "\n", { mode: 0o600 });
   chmodSync(authPath, 0o600);
 }

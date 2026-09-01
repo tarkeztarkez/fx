@@ -377,9 +377,7 @@ pub fn runLogin(
 }
 
 pub fn logout() !chatgpt_session.DeleteOutcome {
-    var mutation = (try chatgpt_session.beginExistingMutation()) orelse return .missing;
-    defer mutation.deinit();
-    return mutation.delete();
+    return error.CodexAuthManagedExternally;
 }
 
 pub fn sourceExists(alloc: Allocator) !bool {
@@ -451,12 +449,15 @@ fn refreshSession(
             return error.InvalidChatGptOAuthResponse;
         break :blk std.math.add(i64, io_mod.milliTimestamp(), duration_ms) catch
             return error.InvalidChatGptOAuthResponse;
-    } else try accessTokenExpiresAtMs(alloc, token.access_token);
+    } else try chatgpt_session.accessTokenExpiresAtMs(alloc, token.access_token);
+    const id_token = if (session.id_token) |value| try alloc.dupe(u8, value) else null;
+    errdefer if (id_token) |value| secret.zeroAndFree(alloc, value);
     var replacement = chatgpt_session.Session{
         .access_token = token.access_token,
         .refresh_token = refresh_token,
         .expires_at_ms = expires_at_ms,
         .account_id = account_id,
+        .id_token = id_token,
     };
     token.access_token = &.{};
     errdefer replacement.deinit(alloc);
@@ -467,6 +468,7 @@ fn refreshSession(
     replacement.access_token = &.{};
     replacement.refresh_token = &.{};
     replacement.account_id = &.{};
+    replacement.id_token = null;
 }
 
 const RefreshTokenResponse = struct {
@@ -516,28 +518,6 @@ fn requestRefreshToken(
         .refresh_token = refresh_token,
         .expires_in = expires_in,
     };
-}
-
-fn accessTokenExpiresAtMs(alloc: Allocator, token: []const u8) !i64 {
-    var parts = std.mem.splitScalar(u8, token, '.');
-    _ = parts.next() orelse return error.InvalidChatGptAccessToken;
-    const payload = parts.next() orelse return error.InvalidChatGptAccessToken;
-    _ = parts.next() orelse return error.InvalidChatGptAccessToken;
-    if (parts.next() != null) return error.InvalidChatGptAccessToken;
-    const decoded_len = std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(payload) catch
-        return error.InvalidChatGptAccessToken;
-    const decoded = try alloc.alloc(u8, decoded_len);
-    defer alloc.free(decoded);
-    std.base64.url_safe_no_pad.Decoder.decode(decoded, payload) catch
-        return error.InvalidChatGptAccessToken;
-    var parsed = std.json.parseFromSlice(std.json.Value, alloc, decoded, .{}) catch
-        return error.InvalidChatGptAccessToken;
-    defer parsed.deinit();
-    if (parsed.value != .object) return error.InvalidChatGptAccessToken;
-    const exp = parsed.value.object.get("exp") orelse return error.InvalidChatGptOAuthResponse;
-    if (exp != .integer or exp.integer <= 0) return error.InvalidChatGptOAuthResponse;
-    return std.math.mul(i64, exp.integer, std.time.ms_per_s) catch
-        return error.InvalidChatGptOAuthResponse;
 }
 
 fn exchangeAuthorizationCodeForRedirectWithBounds(

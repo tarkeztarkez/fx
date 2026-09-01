@@ -1,5 +1,6 @@
 const std = @import("std");
 const io_mod = @import("../shared/io.zig");
+const fork_update = @import("fork_update.zig");
 const helpers = @import("upgrade_helpers.zig");
 const update_target = @import("update_target.zig");
 
@@ -16,6 +17,7 @@ pub const State = enum(u8) {
     downloading = 3,
     ready = 4,
     failed = 5,
+    available = 6,
 };
 
 pub const RelaunchRequest = struct {
@@ -107,6 +109,7 @@ pub const AutoUpgrade = struct {
                 return std.fmt.bufPrint(buf, "upgrading to {s}...", .{ver}) catch "";
             },
             .ready => return "update ready: ctrl+g to reload",
+            .available => return "upstream update ready: /update",
             .failed => return "upgrade failed",
             else => return "",
         }
@@ -154,12 +157,12 @@ pub const AutoUpgrade = struct {
         self.sleepInterruptible(initial_delay_ms);
 
         while (!self.should_stop.load(.acquire)) {
-            if (self.getState() == .ready) return;
+            if (self.getState() == .ready or self.getState() == .available) return;
             self.setState(.checking);
             self.runOnce(alloc, current);
 
             const post_state = self.getState();
-            if (post_state == .ready) return;
+            if (post_state == .ready or post_state == .available) return;
 
             if (post_state != .failed) self.setState(.waiting);
             self.sleepInterruptible(check_interval_ms);
@@ -169,24 +172,9 @@ pub const AutoUpgrade = struct {
     fn runOnce(
         self: *AutoUpgrade,
         alloc: Allocator,
-        current: update_target.CurrentBuild,
+        _: update_target.CurrentBuild,
     ) void {
-        const cdn_base = helpers.resolveCdnBase();
-        var target = helpers.fetchTarget(alloc, self.selected_channel, cdn_base) catch return;
-        defer target.deinit(alloc);
-
-        if (!target.shouldInstall(current)) return;
-
-        var label_buf: [64]u8 = undefined;
-        const label = target.writeDisplayLabel(&label_buf) catch return;
-        self.setLatestVersion(label);
-        self.setState(.downloading);
-
-        self.downloadAndInstall(alloc, target, cdn_base) catch {
-            self.setState(.failed);
-            return;
-        };
-        self.setState(.ready);
+        if (fork_update.updateAvailable(alloc)) self.setState(.available);
     }
 
     const InstallError = error{
