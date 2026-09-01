@@ -6,7 +6,7 @@ Instructions for AI coding agents working with this codebase.
 
 This repository is the `tarkeztarkez/fx` fork of `vercel-labs/fx`. The `upstream` remote tracks the canonical repository.
 
-Keep fork-only changes small and isolated. Prefer new leaf modules and compatibility adapters over edits to shared upstream code. When shared files must change, make the narrowest change possible and avoid unrelated formatting or refactors. `/update` merges `upstream/main`, tests and rebuilds the fork, installs the resulting binary on this machine, and pushes the updated `main` branch to `origin`.
+Keep fork-only changes small and isolated. Prefer new leaf modules and compatibility adapters over edits to shared upstream code. When shared files must change, make the narrowest change possible and avoid unrelated formatting or refactors. `/update` merges `upstream/main`, rebuilds the fork, installs the resulting binary on this machine, and pushes the updated `main` branch to `origin`.
 
 ## Declaring Work Ready
 

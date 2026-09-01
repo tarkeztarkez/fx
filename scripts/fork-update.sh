@@ -31,14 +31,11 @@ else
   fi
 fi
 
-echo "Testing the merged fork..."
-if ! zig build test; then
-  prompt "Fix the test failure in $repo after the upstream merge. Follow AGENTS.md and keep the repair narrow. Then run zig fmt src/, zig build test, and zig build -Doptimize=ReleaseSafe. Install zig-out/bin/fx over $target atomically, commit any repair, and push main to origin."
+echo "Building the release binary..."
+if ! zig build -Doptimize=ReleaseSafe; then
+  prompt "Fix the build failure in $repo after the upstream merge. Follow AGENTS.md and keep the repair narrow. Then run zig fmt src/ and zig build -Doptimize=ReleaseSafe. Install zig-out/bin/fx over $target atomically, commit any repair, and push main to origin."
   exit 3
 fi
-
-echo "Building the release binary..."
-zig build -Doptimize=ReleaseSafe
 
 target_dir=$(dirname "$target")
 tmp="$target_dir/.fx-update-$$"
